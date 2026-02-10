@@ -1,0 +1,1 @@
+This is the readme for the 2026 Smart Luggage Logistics Capstone Project
