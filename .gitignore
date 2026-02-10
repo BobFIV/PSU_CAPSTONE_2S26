@@ -1,0 +1,50 @@
+# ========================
+# Zephyr / nRF Connect SDK
+# ========================
+
+# Build output
+/..Initiator/
+/build_*/
+/out/
+
+# West / Zephyr
+/.west/
+/zephyr/.config
+/zephyr/include/generated/
+
+# CMake
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/compile_commands.json
+
+# Ninja
+/.ninja_deps
+/.ninja_log
+
+# Generated binaries
+*.elf
+*.hex
+*.bin
+*.map
+*.uf2
+
+# Logs
+*.log
+
+# ========================
+# IDE / Editor
+# ========================
+
+# VS Code (optional)
+.vscode/
+
+# CLion
+.idea/
+
+# ========================
+# OS junk
+# ========================
+
+.DS_Store
+Thumbs.db
