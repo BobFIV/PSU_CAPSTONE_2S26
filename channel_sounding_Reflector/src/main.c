@@ -13,6 +13,7 @@
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/sys/byteorder.h>
 #include <zephyr/sys/reboot.h>
+#include <zephyr/sys/printk.h>
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/cs.h>
@@ -233,7 +234,10 @@ int main(void)
 			LOG_ERR("Failed to configure default CS settings (err %d)", err);
 		}
 
-		k_sem_take(&sem_config, K_FOREVER);
+		/* Avoid silent hang if config never arrives */
+		while (k_sem_take(&sem_config, K_SECONDS(5)) != 0) {
+			printk("WAIT_CONFIG\n");
+		}
 
 		const struct bt_le_cs_set_procedure_parameters_param procedure_params = {
 			.config_id = 0,
@@ -257,6 +261,15 @@ int main(void)
 			return 0;
 		}
 
+		struct bt_le_cs_procedure_enable_param en = {
+			.config_id = 0,
+			.enable = 1,
+		};
+
+		err = bt_le_cs_procedure_enable(connection, &en);
+		if (err) {
+			printk("ERR proc_enable %d\n", err);
+		}
 	}
 
 	return 0;
