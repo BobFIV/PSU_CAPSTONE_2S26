@@ -1,0 +1,271 @@
+!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Luggage Monitor</title>
+
+<style>
+body {
+  font-family: Arial;
+  margin: 0;
+  background: #f5f5f5;
+  text-align: center;
+}
+
+.screen { display:none; padding:15px; padding-bottom:90px; }
+.active { display:block; }
+
+.statusBox {
+  width:70vw; max-width:260px;
+  height:70vw; max-height:260px;
+  margin:20px auto;
+  border-radius:25px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  font-size:26px;
+  font-weight:bold;
+  color:white;
+  background:gray;
+}
+
+.card {
+  background:white;
+  padding:15px;
+  margin:12px;
+  border-radius:15px;
+  box-shadow:0 2px 6px rgba(0,0,0,0.1);
+}
+
+input {
+  width:80px;
+  padding:5px;
+  font-size:16px;
+  text-align:center;
+}
+
+button {
+  padding:10px 15px;
+  font-size:16px;
+  border-radius:10px;
+  border:none;
+  background:#007bff;
+  color:white;
+}
+
+.nav {
+  position:fixed;
+  bottom:0;
+  width:100%;
+  display:flex;
+  background:white;
+  border-top:1px solid #ccc;
+}
+
+.nav button {
+  flex:1;
+  padding:14px 5px;
+  font-size:14px;
+  background:white;
+  color:black;
+}
+</style>
+</head>
+
+<body>
+
+<!-- STATUS -->
+
+<div id="status" class="screen active">
+<h1>Status</h1>
+
+<div id="statusBox" class="statusBox">--</div>
+
+<div class="card">
+<h2 id="distance">Distance: --</h2>
+<h2 id="state">State: --</h2>
+<p id="alertText" style="color:red;font-weight:bold;"></p>
+</div>
+</div>
+
+<!-- WHEELCHAIR -->
+
+<div id="wheelchair" class="screen">
+<h1>Wheelchair</h1>
+<div class="card">
+<h2 id="battery">Battery: --</h2>
+<h2 id="link">Link: --</h2>
+<h2 id="server">Server: --</h2>
+<h3 id="lastUpdate"></h3>
+</div>
+</div>
+
+<!-- SETTINGS -->
+
+<div id="settings" class="screen">
+<h1>Settings</h1>
+
+<div class="card">
+<h3>Alert Thresholds (cm)</h3>
+
+<p>Normal max:</p>
+<input id="cautionInput" type="number">
+
+<br><br>
+<button onclick="saveThresholds()">Save</button>
+
+<p id="saveMsg"></p>
+
+<br>
+<button onclick="enableNotifications()">
+Enable Alerts
+</button>
+<p id="notifMsg"></p>
+
+</div>
+</div>
+
+<!-- NAV -->
+
+<div class="nav">
+<button onclick="show('status')">Status</button>
+<button onclick="show('wheelchair')">Chair</button>
+<button onclick="show('settings')">Settings</button>
+</div>
+
+<script>
+
+/* ---------- Navigation ---------- */
+
+function show(id){
+  document.querySelectorAll('.screen')
+    .forEach(s=>s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+
+/* ---------- Threshold Storage ---------- */
+
+let thresholds = JSON.parse(localStorage.getItem("thresholds")) || {
+  normalMax:150,
+  cautionMax:300
+};
+
+normalInput.value = thresholds.normalMax;
+cautionInput.value = thresholds.cautionMax;
+
+function saveThresholds(){
+  thresholds.normalMax = Number(normalInput.value);
+  thresholds.cautionMax = Number(cautionInput.value);
+
+  localStorage.setItem("thresholds",
+    JSON.stringify(thresholds));
+
+  saveMsg.innerText = "Saved!";
+}
+/* ---------- Notifications Permission ---------- */
+
+if ("Notification" in window) {
+  Notification.requestPermission();
+}
+
+/* ---------- Alert State Tracking ---------- */
+
+let lastState="";
+let lastVibeTime=0;
+
+/* ---------- Fetch Data ---------- */
+
+async function fetchData(){
+
+  const prox = await fetch('/api/proximity').then(r=>r.json());
+  const status = await fetch('/api/status').then(r=>r.json());
+
+  let distance = prox.distance_cm;
+
+/* ----- Determine State ----- */
+
+  let state="normal";
+
+  if(distance > thresholds.cautionMax)
+    state="separation";
+  else if(distance > thresholds.normalMax)
+    state="caution";
+
+/* ----- UI Updates ----- */
+
+  distanceEl.innerText = "Distance: "+distance+" cm";
+  stateEl.innerText = "State: "+state;
+
+  const box=statusBox;
+  box.innerText=state.toUpperCase();
+
+  if(state==="normal") box.style.background="green";
+  else if(state==="caution") box.style.background="orange";
+  else box.style.background="red";
+
+  alertText.innerText =
+    (state==="separation") ? "LUGGAGE TOO FAR" : "";
+
+/* ----- Vibration + Notification ----- */
+
+  let now=Date.now();
+
+  if(state==="separation" &&
+     lastState!=="separation"){
+
+    // Vibration
+    if("vibrate" in navigator &&
+       now-lastVibeTime>5000){
+       navigator.vibrate([300,150,300,150,500]);
+       lastVibeTime=now;
+    }
+
+    // Notification
+    if(Notification.permission==="granted"){
+      new Notification("Luggage Separation Alert",{
+        body:"Your luggage is too far away.",
+        icon:"https://cdn-icons-png.flaticon.com/512/854/854878.png"
+      });
+    }
+  }
+
+  lastState=state;
+
+/* ----- Wheelchair Status ----- */
+
+  battery.innerText =
+    "Battery: "+status.battery_level+"%";
+
+  link.innerText =
+    "Link: "+status.link_state;
+
+  server.innerText =
+    "Server: "+status.server_state;
+
+  lastUpdate.innerText =
+    "Updated: "+new Date(
+      status.last_update_time).toLocaleTimeString();
+}
+
+/* ----- Element Shortcuts ----- */
+
+const distanceEl = document.getElementById("distance");
+const stateEl = document.getElementById("state");
+const statusBox = document.getElementById("statusBox");
+const alertText = document.getElementById("alertText");
+const battery = document.getElementById("battery");
+const link = document.getElementById("link");
+const server = document.getElementById("server");
+const lastUpdate = document.getElementById("lastUpdate");
+
+/* ----- Start Polling ----- */
+
+setInterval(fetchData,1000);
+fetchData();
+
+</script>
+
+</body>
+</html>
+
