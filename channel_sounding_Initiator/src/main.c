@@ -4,21 +4,9 @@
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
 
-/** @file
- *  @brief Channel Sounding Initiator with Ranging Requestor sample
- *
- *  Modifications to original smaple source code
- *   - Output one distance per update using a best-estimate selector:
- *       * Prefer RTT
- *       * Fallback to phase_slope, then IFFT
- *       * If RTT + phase_slope both valid but disagree a lot, use the smaller one
- *       * If multi-antenna paths are enabled, pick the smallest candidate across APs
- *
- *  The output is in meters. 
- */
-
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/types.h>
@@ -41,11 +29,11 @@ LOG_MODULE_REGISTER(app_main, LOG_LEVEL_INF);
 
 #define CON_STATUS_LED DK_LED1
 
-#define CS_CONFIG_ID	       0
-#define NUM_MODE_0_STEPS       3
-#define PROCEDURE_COUNTER_NONE (-1)
-#define DE_SLIDING_WINDOW_SIZE (9)
-#define MAX_AP		       (CONFIG_BT_RAS_MAX_ANTENNA_PATHS)
+#define CS_CONFIG_ID               0
+#define NUM_MODE_0_STEPS           3
+#define PROCEDURE_COUNTER_NONE     (-1)
+#define DE_SLIDING_WINDOW_SIZE     (9)
+#define MAX_AP                     (CONFIG_BT_RAS_MAX_ANTENNA_PATHS)
 
 #define LOCAL_PROCEDURE_MEM                                                                        \
 	((BT_RAS_MAX_STEPS_PER_PROCEDURE * sizeof(struct bt_le_cs_subevent_step)) +                \
@@ -67,6 +55,7 @@ static K_MUTEX_DEFINE(distance_estimate_buffer_mutex);
 static struct bt_conn *connection;
 NET_BUF_SIMPLE_DEFINE_STATIC(latest_local_steps, LOCAL_PROCEDURE_MEM);
 NET_BUF_SIMPLE_DEFINE_STATIC(latest_peer_steps, BT_RAS_PROCEDURE_MEM);
+
 static int32_t most_recent_local_ranging_counter = PROCEDURE_COUNTER_NONE;
 static int32_t dropped_ranging_counter = PROCEDURE_COUNTER_NONE;
 static uint32_t ras_feature_bits;
@@ -102,104 +91,172 @@ static int float_cmp(const void *a, const void *b)
 	return (fa > fb) - (fa < fb);
 }
 
-static float median_inplace(int count, float *values)
+static float median_inplace(int n, float *v)
 {
-	if (count == 0) {
+	if (n <= 0) {
 		return NAN;
 	}
-
-	qsort(values, count, sizeof(float), float_cmp);
-
-	if (count % 2 == 0) {
-		return (values[count / 2] + values[count / 2 - 1]) / 2;
-	} else {
-		return values[count / 2];
+	qsort(v, n, sizeof(float), float_cmp);
+	if (n & 1) {
+		return v[n / 2];
 	}
+	return 0.5f * (v[n / 2 - 1] + v[n / 2]);
+}
+
+static float trimmed_mean_inplace(int n, float *v)
+{
+	if (n <= 0) {
+		return NAN;
+	}
+	qsort(v, n, sizeof(float), float_cmp);
+
+	if (n < 7) {
+		if (n & 1) {
+			return v[n / 2];
+		}
+		return 0.5f * (v[n / 2 - 1] + v[n / 2]);
+	}
+
+	int lo = 1;
+	int hi = n - 2;
+	float sum = 0.0f;
+	for (int i = lo; i <= hi; i++) {
+		sum += v[i];
+	}
+	return sum / (float)(hi - lo + 1);
+}
+
+static float median3(float a, float b, float c)
+{
+	if (a > b) { float t = a; a = b; b = t; }
+	if (b > c) { float t = b; b = c; c = t; }
+	if (a > b) { float t = a; a = b; b = t; }
+	return b;
 }
 
 static cs_de_dist_estimates_t get_distance(uint8_t ap)
 {
-	cs_de_dist_estimates_t averaged_result = {};
-	uint8_t num_ifft = 0;
-	uint8_t num_phase_slope = 0;
-	uint8_t num_rtt = 0;
+	cs_de_dist_estimates_t result = {};
+	uint8_t n_ifft = 0;
+	uint8_t n_ps = 0;
+	uint8_t n_rtt = 0;
 
-	static float temp_ifft[DE_SLIDING_WINDOW_SIZE];
-	static float temp_phase_slope[DE_SLIDING_WINDOW_SIZE];
-	static float temp_rtt[DE_SLIDING_WINDOW_SIZE];
+	static float tmp_ifft[DE_SLIDING_WINDOW_SIZE];
+	static float tmp_ps[DE_SLIDING_WINDOW_SIZE];
+	static float tmp_rtt[DE_SLIDING_WINDOW_SIZE];
 
 	int lock_state = k_mutex_lock(&distance_estimate_buffer_mutex, K_FOREVER);
 	__ASSERT_NO_MSG(lock_state == 0);
 
 	for (uint8_t i = 0; i < buffer_num_valid; i++) {
 		if (isfinite(distance_estimate_buffer[ap][i].ifft)) {
-			temp_ifft[num_ifft++] = distance_estimate_buffer[ap][i].ifft;
+			tmp_ifft[n_ifft++] = distance_estimate_buffer[ap][i].ifft;
 		}
 		if (isfinite(distance_estimate_buffer[ap][i].phase_slope)) {
-			temp_phase_slope[num_phase_slope++] =
-				distance_estimate_buffer[ap][i].phase_slope;
+			tmp_ps[n_ps++] = distance_estimate_buffer[ap][i].phase_slope;
 		}
 		if (isfinite(distance_estimate_buffer[ap][i].rtt)) {
-			temp_rtt[num_rtt++] = distance_estimate_buffer[ap][i].rtt;
+			tmp_rtt[n_rtt++] = distance_estimate_buffer[ap][i].rtt;
 		}
 	}
 
 	k_mutex_unlock(&distance_estimate_buffer_mutex);
 
-	averaged_result.ifft = median_inplace(num_ifft, temp_ifft);
-	averaged_result.phase_slope = median_inplace(num_phase_slope, temp_phase_slope);
-	averaged_result.rtt = median_inplace(num_rtt, temp_rtt);
+	result.ifft = trimmed_mean_inplace(n_ifft, tmp_ifft);
+	result.phase_slope = trimmed_mean_inplace(n_ps, tmp_ps);
+	result.rtt = trimmed_mean_inplace(n_rtt, tmp_rtt);
 
-	return averaged_result;
+	return result;
 }
 
+#define DIST_MIN_M      (0.0f)
+#define DIST_MAX_M      (30.0f)
 
-//best estimate distance detector
-static bool compute_best_distance(float *out_m)
+#define PS_ANCHOR_M     (1.2f)
+#define RTT_AGREE_M     (1.0f)
+
+#define AP_SPREAD_BAD_M (1.0f)
+
+#define DT_SEC          (0.060f)
+
+#define AB_ALPHA_GOOD   (0.20f)
+#define AB_BETA_GOOD    (0.030f)
+
+#define AB_ALPHA_BAD    (0.06f)
+#define AB_BETA_BAD     (0.010f)
+
+#define EMA_ALPHA       (0.10f)
+
+#define MAD_WIN         (21)
+#define MAD_K           (3.0f)
+#define MAD_EPS         (0.06f)
+
+static bool fuse_one_ap(const cs_de_dist_estimates_t *de, float *out, float *spread_out)
+{
+	float ifft = de->ifft;
+	float ps   = de->phase_slope;
+	float rtt  = de->rtt;
+
+	bool ifft_ok = isfinite(ifft) && (ifft >= DIST_MIN_M) && (ifft <= DIST_MAX_M);
+	bool ps_ok   = isfinite(ps)   && (ps   >= DIST_MIN_M) && (ps   <= DIST_MAX_M);
+	bool rtt_ok  = isfinite(rtt)  && (rtt  >= DIST_MIN_M) && (rtt  <= DIST_MAX_M);
+
+	if (ps_ok && ifft_ok && fabsf(ps - ifft) > PS_ANCHOR_M) {
+		ps_ok = false;
+	}
+
+	if (rtt_ok) {
+		bool agrees =
+			(ifft_ok && fabsf(rtt - ifft) <= RTT_AGREE_M) ||
+			(ps_ok   && fabsf(rtt - ps)   <= RTT_AGREE_M);
+		if (!agrees) {
+			rtt_ok = false;
+		}
+	}
+
+	float v[3];
+	int n = 0;
+	if (ifft_ok) v[n++] = ifft;
+	if (ps_ok)   v[n++] = ps;
+	if (rtt_ok)  v[n++] = rtt;
+
+	if (n == 0) return false;
+
+	float vmin = v[0], vmax = v[0];
+	for (int i = 1; i < n; i++) {
+		if (v[i] < vmin) vmin = v[i];
+		if (v[i] > vmax) vmax = v[i];
+	}
+	*spread_out = vmax - vmin;
+
+	if (n == 1) {
+		*out = v[0];
+		return true;
+	}
+	if (n == 2) {
+		*out = 0.5f * (v[0] + v[1]);
+		return true;
+	}
+	*out = median3(v[0], v[1], v[2]);
+	return true;
+}
+
+static bool compute_measurement(float *meas_out, float *spread_out)
 {
 	float best = NAN;
-
-	//limits for values
-	const float MIN_M = 0.0f;
-	const float MAX_M = 30.0f;
-
-	/* If RTT and phase_slope differ more than this, we assume one is on a longer path.
-	 * In that case, choose the smaller of the two.
-	 */
-	const float DISAGREE_M = 2.0f;
+	float best_spread = INFINITY;
 
 	for (uint8_t ap = 0; ap < MAX_AP; ap++) {
 		cs_de_dist_estimates_t de = get_distance(ap);
+		float fused, spread;
 
-		float rtt  = de.rtt;
-		float ps   = de.phase_slope;
-		float ifft = de.ifft;
-
-		bool rtt_ok  = isfinite(rtt)  && (rtt  >= MIN_M) && (rtt  <= MAX_M);
-		bool ps_ok   = isfinite(ps)   && (ps   >= MIN_M) && (ps   <= MAX_M);
-		bool ifft_ok = isfinite(ifft) && (ifft >= MIN_M) && (ifft <= MAX_M);
-
-		float candidate = NAN;
-
-		if (rtt_ok && ps_ok) {
-			if (fabsf(rtt - ps) > DISAGREE_M) {
-				candidate = fminf(rtt, ps);
-			} else {
-				candidate = rtt; //we prefer RTT when it is consistent because we want consistency
-			}
-		} else if (rtt_ok) {
-			candidate = rtt;
-		} else if (ps_ok) {
-			candidate = ps;
-		} else if (ifft_ok) {
-			candidate = ifft;
-		} else {
+		if (!fuse_one_ap(&de, &fused, &spread)) {
 			continue;
 		}
 
-		/* If multi-AP enabled, pick the smallest across paths */
-		if (!isfinite(best) || candidate < best) {
-			best = candidate;
+		if (!isfinite(best) || spread < best_spread) {
+			best = fused;
+			best_spread = spread;
 		}
 	}
 
@@ -207,10 +264,81 @@ static bool compute_best_distance(float *out_m)
 		return false;
 	}
 
-	*out_m = best;
+	*meas_out = best;
+	*spread_out = best_spread;
 	return true;
 }
 
+static float mad_gate(float x, bool *accepted_out)
+{
+	static float hist[MAD_WIN];
+	static uint8_t idx;
+	static uint8_t count;
+
+	hist[idx] = x;
+	idx = (idx + 1) % MAD_WIN;
+	if (count < MAD_WIN) count++;
+
+	if (count < 7) {
+		*accepted_out = true;
+		return x;
+	}
+
+	float tmp[MAD_WIN];
+	for (uint8_t i = 0; i < count; i++) {
+		tmp[i] = hist[i];
+	}
+	float m = median_inplace(count, tmp);
+
+	for (uint8_t i = 0; i < count; i++) {
+		tmp[i] = fabsf(hist[i] - m);
+	}
+	float mad = median_inplace(count, tmp);
+
+	float sigma = 1.4826f * mad;
+	float thr = MAD_K * sigma + MAD_EPS;
+
+	if (fabsf(x - m) > thr) {
+		*accepted_out = false;
+		return m;
+	}
+
+	*accepted_out = true;
+	return x;
+}
+
+static float alpha_beta_filter(float z, float alpha, float beta, bool reset)
+{
+	static float x = NAN;
+	static float v = 0.0f;
+
+	if (reset || !isfinite(x)) {
+		x = z;
+		v = 0.0f;
+		return x;
+	}
+
+	float x_pred = x + v * DT_SEC;
+	float r = z - x_pred;
+
+	x = x_pred + alpha * r;
+	v = v + (beta / DT_SEC) * r;
+
+	return x;
+}
+
+static float ema_filter(float z, bool reset)
+{
+	static float y = NAN;
+
+	if (reset || !isfinite(y)) {
+		y = z;
+		return y;
+	}
+
+	y = (1.0f - EMA_ALPHA) * y + EMA_ALPHA * z;
+	return y;
+}
 
 static void ranging_data_cb(struct bt_conn *conn, uint16_t ranging_counter, int err)
 {
@@ -289,13 +417,11 @@ static void subevent_result_cb(struct bt_conn *conn, struct bt_conn_le_cs_subeve
 			bt_ras_rreq_get_ranging_counter(result->header.procedure_counter);
 	}
 
-	if (result->header.subevent_done_status == BT_CONN_LE_CS_SUBEVENT_ABORTED) {
-		/* The steps from this subevent will not be used. */
-	} else if (result->step_data_buf) {
+	if (result->header.subevent_done_status != BT_CONN_LE_CS_SUBEVENT_ABORTED &&
+	    result->step_data_buf) {
 		if (result->step_data_buf->len <= net_buf_simple_tailroom(&latest_local_steps)) {
 			uint16_t len = result->step_data_buf->len;
 			uint8_t *step_data = net_buf_simple_pull_mem(result->step_data_buf, len);
-
 			net_buf_simple_add_mem(&latest_local_steps, step_data, len);
 		} else {
 			LOG_ERR("Not enough memory to store step data. (%d > %d)",
@@ -434,9 +560,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 		connection = NULL;
 	} else {
 		connection = bt_conn_ref(conn);
-
 		k_sem_give(&sem_connected);
-
 		dk_set_led_on(CON_STATUS_LED);
 	}
 }
@@ -559,7 +683,8 @@ static int scan_init(void)
 	struct bt_scan_init_param param = {
 		.scan_param = NULL,
 		.conn_param = BT_LE_CONN_PARAM(0x10, 0x10, 0, BT_GAP_MS_TO_CONN_TIMEOUT(4000)),
-		.connect_if_match = 1};
+		.connect_if_match = 1
+	};
 
 	bt_scan_init(&param);
 	bt_scan_cb_register(&scan_cb);
@@ -767,6 +892,8 @@ int main(void)
 		return 0;
 	}
 
+	bool reset_filters = true;
+
 	while (true) {
 		k_sem_take(&sem_distance_estimate_updated, K_FOREVER);
 
@@ -774,13 +901,25 @@ int main(void)
 			continue;
 		}
 
-		float d_m;
-		if (!compute_best_distance(&d_m)) {
+		float meas, spread;
+		if (!compute_measurement(&meas, &spread)) {
 			continue;
 		}
 
-		//one output per line
-		printk("%.2f\n", (double)d_m);
+		bool accepted;
+		float gated = mad_gate(meas, &accepted);
+
+		bool bad_frame = (!accepted) || (spread > AP_SPREAD_BAD_M);
+
+		float alpha = bad_frame ? AB_ALPHA_BAD : AB_ALPHA_GOOD;
+		float beta  = bad_frame ? AB_BETA_BAD  : AB_BETA_GOOD;
+
+		float ab = alpha_beta_filter(gated, alpha, beta, reset_filters);
+		float out = ema_filter(ab, reset_filters);
+
+		reset_filters = false;
+
+		printk("%.2f\n", (double)out);
 	}
 
 	return 0;
