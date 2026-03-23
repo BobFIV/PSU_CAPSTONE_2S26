@@ -22,3 +22,6 @@
 
 - **Output behavior**
  - Prints one value per output in meters
+
+ - **Reflector Tag**
+  - Added User name as Reflector Device name. Name is outputted to initiator serial output when connecting to reflector device.
