@@ -26,6 +26,9 @@ LOG_MODULE_REGISTER(app_main, LOG_LEVEL_INF);
 
 #define CON_STATUS_LED DK_LED1
 
+//Custom Reflector Flag per user
+static const char reflector_name[] = "Ryan Litzinger";
+
 static K_SEM_DEFINE(sem_connected, 0, 1);
 static K_SEM_DEFINE(sem_config, 0, 1);
 
@@ -34,7 +37,7 @@ static struct bt_conn *connection;
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
 	BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_16_ENCODE(BT_UUID_RANGING_SERVICE_VAL)),
-	BT_DATA(BT_DATA_NAME_COMPLETE, CONFIG_BT_DEVICE_NAME, sizeof(CONFIG_BT_DEVICE_NAME) - 1),
+	BT_DATA(BT_DATA_NAME_COMPLETE, reflector_name, sizeof(reflector_name) - 1),
 };
 
 static void connected_cb(struct bt_conn *conn, uint8_t err)
@@ -200,6 +203,7 @@ int main(void)
 	int err;
 
 	LOG_INF("Starting Channel Sounding Reflector Sample");
+	LOG_INF("Advertising reflector tag: %s", reflector_name);
 
 	dk_leds_init();
 
@@ -234,7 +238,6 @@ int main(void)
 			LOG_ERR("Failed to configure default CS settings (err %d)", err);
 		}
 
-		/* Avoid silent hang if config never arrives */
 		while (k_sem_take(&sem_config, K_SECONDS(5)) != 0) {
 			printk("WAIT_CONFIG\n");
 		}

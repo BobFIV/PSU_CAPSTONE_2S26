@@ -14,9 +14,12 @@
 #include <zephyr/sys/reboot.h>
 #include <zephyr/sys/printk.h>
 
+#include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/cs.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/bluetooth/conn.h>
+#include <zephyr/bluetooth/hci.h>
+
 #include <bluetooth/scan.h>
 #include <bluetooth/services/ras.h>
 #include <bluetooth/gatt_dm.h>
@@ -34,6 +37,7 @@ LOG_MODULE_REGISTER(app_main, LOG_LEVEL_INF);
 #define PROCEDURE_COUNTER_NONE     (-1)
 #define DE_SLIDING_WINDOW_SIZE     (9)
 #define MAX_AP                     (CONFIG_BT_RAS_MAX_ANTENNA_PATHS)
+#define DEVICE_NAME_LEN            32
 
 #define LOCAL_PROCEDURE_MEM                                                                        \
 	((BT_RAS_MAX_STEPS_PER_PROCEDURE * sizeof(struct bt_le_cs_subevent_step)) +                \
@@ -64,6 +68,10 @@ static uint8_t buffer_index;
 static uint8_t buffer_num_valid;
 static cs_de_dist_estimates_t distance_estimate_buffer[MAX_AP][DE_SLIDING_WINDOW_SIZE];
 static struct bt_conn_le_cs_config cs_config;
+
+/* Added for reading reflector name from advertising */
+static char matched_reflector_name[DEVICE_NAME_LEN];
+static bool matched_reflector_name_valid;
 
 static void store_distance_estimates(cs_de_report_t *p_report)
 {
@@ -507,6 +515,7 @@ static void discovery_completed_cb(struct bt_gatt_dm *dm, void *context)
 
 static void discovery_service_not_found_cb(struct bt_conn *conn, void *context)
 {
+	ARG_UNUSED(conn);
 	ARG_UNUSED(context);
 	LOG_INF("The service could not be found during the discovery, disconnecting");
 	bt_conn_disconnect(connection, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
@@ -514,6 +523,7 @@ static void discovery_service_not_found_cb(struct bt_conn *conn, void *context)
 
 static void discovery_error_found_cb(struct bt_conn *conn, int err, void *context)
 {
+	ARG_UNUSED(conn);
 	ARG_UNUSED(context);
 	LOG_INF("The discovery procedure failed (err %d)", err);
 	bt_conn_disconnect(connection, BT_HCI_ERR_REMOTE_USER_TERM_CONN);
@@ -645,14 +655,52 @@ void ras_features_read_cb(struct bt_conn *conn, uint32_t feature_bits, int err)
 	k_sem_give(&sem_ras_features);
 }
 
+/* Parse advertised device name from reflector */
+static bool adv_data_name_cb(struct bt_data *data, void *user_data)
+{
+	char *name = user_data;
+
+	if (data->type == BT_DATA_NAME_COMPLETE ||
+	    data->type == BT_DATA_NAME_SHORTENED) {
+		size_t len = MIN(data->data_len, DEVICE_NAME_LEN - 1);
+
+		memcpy(name, data->data, len);
+		name[len] = '\0';
+
+		return false;
+	}
+
+	return true;
+}
+
 static void scan_filter_match(struct bt_scan_device_info *device_info,
 			      struct bt_scan_filter_match *filter_match, bool connectable)
 {
 	ARG_UNUSED(filter_match);
 
 	char addr[BT_ADDR_LE_STR_LEN];
+	char name[DEVICE_NAME_LEN] = {0};
+
 	bt_addr_le_to_str(device_info->recv_info->addr, addr, sizeof(addr));
-	LOG_INF("Filters matched. Address: %s connectable: %d", addr, connectable);
+
+	if (device_info->adv_data) {
+		bt_data_parse(device_info->adv_data, adv_data_name_cb, name);
+	}
+
+	if (name[0] != '\0') {
+		strncpy(matched_reflector_name, name, sizeof(matched_reflector_name) - 1);
+		matched_reflector_name[sizeof(matched_reflector_name) - 1] = '\0';
+		matched_reflector_name_valid = true;
+
+		LOG_INF("Filters matched. Address: %s connectable: %d name: %s",
+			addr, connectable, matched_reflector_name);
+	} else {
+		matched_reflector_name[0] = '\0';
+		matched_reflector_name_valid = false;
+
+		LOG_INF("Filters matched. Address: %s connectable: %d name: <not present>",
+			addr, connectable);
+	}
 }
 
 static void scan_connecting_error(struct bt_scan_device_info *device_info)
@@ -661,7 +709,7 @@ static void scan_connecting_error(struct bt_scan_device_info *device_info)
 
 	LOG_INF("Connecting failed, restarting scanning");
 
-	int err = bt_scan_start(BT_SCAN_TYPE_SCAN_PASSIVE);
+	int err = bt_scan_start(BT_SCAN_TYPE_SCAN_ACTIVE);
 	if (err) {
 		LOG_ERR("Failed to restart scanning (err %i)", err);
 	}
@@ -671,7 +719,12 @@ static void scan_connecting(struct bt_scan_device_info *device_info, struct bt_c
 {
 	ARG_UNUSED(device_info);
 	ARG_UNUSED(conn);
-	LOG_INF("Connecting");
+
+	if (matched_reflector_name_valid) {
+		LOG_INF("Connecting to reflector tag: %s", matched_reflector_name);
+	} else {
+		LOG_INF("Connecting to reflector tag: <unknown>");
+	}
 }
 
 BT_SCAN_CB_INIT(scan_cb, scan_filter_match, NULL, scan_connecting_error, scan_connecting);
@@ -681,7 +734,10 @@ static int scan_init(void)
 	int err;
 
 	struct bt_scan_init_param param = {
-		.scan_param = NULL,
+		.scan_param = BT_LE_SCAN_PARAM(BT_LE_SCAN_TYPE_ACTIVE,
+					       BT_LE_SCAN_OPT_NONE,
+					       BT_GAP_SCAN_FAST_INTERVAL,
+					       BT_GAP_SCAN_FAST_WINDOW),
 		.conn_param = BT_LE_CONN_PARAM(0x10, 0x10, 0, BT_GAP_MS_TO_CONN_TIMEOUT(4000)),
 		.connect_if_match = 1
 	};
@@ -736,7 +792,7 @@ int main(void)
 		return 0;
 	}
 
-	err = bt_scan_start(BT_SCAN_TYPE_SCAN_PASSIVE);
+	err = bt_scan_start(BT_SCAN_TYPE_SCAN_ACTIVE);
 	if (err) {
 		LOG_ERR("Scanning failed to start (err %i)", err);
 		return 0;
