@@ -7,6 +7,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 
 #include <zephyr/kernel.h>
 #include <zephyr/types.h>
@@ -30,6 +31,8 @@
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(app_main, LOG_LEVEL_INF);
 
+
+
 #define CON_STATUS_LED DK_LED1
 
 #define CS_CONFIG_ID               0
@@ -37,11 +40,48 @@ LOG_MODULE_REGISTER(app_main, LOG_LEVEL_INF);
 #define PROCEDURE_COUNTER_NONE     (-1)
 #define DE_SLIDING_WINDOW_SIZE     (9)
 #define MAX_AP                     (CONFIG_BT_RAS_MAX_ANTENNA_PATHS)
-#define DEVICE_NAME_LEN            32
 
-#define LOCAL_PROCEDURE_MEM                                                                        \
-	((BT_RAS_MAX_STEPS_PER_PROCEDURE * sizeof(struct bt_le_cs_subevent_step)) +                \
+#define LOCAL_PROCEDURE_MEM \
+	((BT_RAS_MAX_STEPS_PER_PROCEDURE * sizeof(struct bt_le_cs_subevent_step)) + \
 	 (BT_RAS_MAX_STEPS_PER_PROCEDURE * BT_RAS_MAX_STEP_DATA_LEN))
+
+#define DIST_MIN_M      (0.0f)
+#define DIST_MAX_M      (30.0f)
+
+#define PS_ANCHOR_M     (1.2f)
+#define RTT_AGREE_M     (1.0f)
+
+#define AP_SPREAD_BAD_M (1.0f)
+
+#define DT_SEC          (0.060f)
+
+#define AB_ALPHA_GOOD   (0.20f)
+#define AB_BETA_GOOD    (0.030f)
+
+#define AB_ALPHA_BAD    (0.06f)
+#define AB_BETA_BAD     (0.010f)
+
+#define EMA_ALPHA       (0.10f)
+
+#define MAD_WIN         (21)
+#define MAD_K           (3.0f)
+#define MAD_EPS         (0.06f)
+
+#define BOARD_ID_LEN 8
+
+static uint8_t cached_board_id[BOARD_ID_LEN];
+static bool board_id_valid;
+
+static uint32_t distance_print_count;
+#define BOARD_ID_PRINT_EVERY 20
+
+/* Must match reflector characteristic UUID exactly */
+static struct bt_uuid_128 board_id_char_uuid =
+	BT_UUID_INIT_128(0x11, 0x32, 0x54, 0x76,
+			 0x98, 0xba,
+			 0xdc, 0xfe,
+			 0x10, 0x32,
+			 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe);
 
 static K_SEM_DEFINE(sem_remote_capabilities_obtained, 0, 1);
 static K_SEM_DEFINE(sem_config_created, 0, 1);
@@ -53,6 +93,7 @@ static K_SEM_DEFINE(sem_security, 0, 1);
 static K_SEM_DEFINE(sem_ras_features, 0, 1);
 static K_SEM_DEFINE(sem_local_steps, 1, 1);
 static K_SEM_DEFINE(sem_distance_estimate_updated, 0, 1);
+static K_SEM_DEFINE(sem_board_id_read, 0, 1);
 
 static K_MUTEX_DEFINE(distance_estimate_buffer_mutex);
 
@@ -69,9 +110,10 @@ static uint8_t buffer_num_valid;
 static cs_de_dist_estimates_t distance_estimate_buffer[MAX_AP][DE_SLIDING_WINDOW_SIZE];
 static struct bt_conn_le_cs_config cs_config;
 
-/* Added for reading reflector name from advertising */
-static char matched_reflector_name[DEVICE_NAME_LEN];
-static bool matched_reflector_name_valid;
+/* Board ID read state */
+static struct bt_gatt_discover_params board_id_discover_params;
+static struct bt_gatt_read_params board_id_read_params;
+static uint16_t board_id_value_handle;
 
 static void store_distance_estimates(cs_de_report_t *p_report)
 {
@@ -104,10 +146,13 @@ static float median_inplace(int n, float *v)
 	if (n <= 0) {
 		return NAN;
 	}
+
 	qsort(v, n, sizeof(float), float_cmp);
+
 	if (n & 1) {
 		return v[n / 2];
 	}
+
 	return 0.5f * (v[n / 2 - 1] + v[n / 2]);
 }
 
@@ -116,6 +161,7 @@ static float trimmed_mean_inplace(int n, float *v)
 	if (n <= 0) {
 		return NAN;
 	}
+
 	qsort(v, n, sizeof(float), float_cmp);
 
 	if (n < 7) {
@@ -128,17 +174,32 @@ static float trimmed_mean_inplace(int n, float *v)
 	int lo = 1;
 	int hi = n - 2;
 	float sum = 0.0f;
+
 	for (int i = lo; i <= hi; i++) {
 		sum += v[i];
 	}
+
 	return sum / (float)(hi - lo + 1);
 }
 
 static float median3(float a, float b, float c)
 {
-	if (a > b) { float t = a; a = b; b = t; }
-	if (b > c) { float t = b; b = c; c = t; }
-	if (a > b) { float t = a; a = b; b = t; }
+	if (a > b) {
+		float t = a;
+		a = b;
+		b = t;
+	}
+	if (b > c) {
+		float t = b;
+		b = c;
+		c = t;
+	}
+	if (a > b) {
+		float t = a;
+		a = b;
+		b = t;
+	}
+
 	return b;
 }
 
@@ -177,37 +238,15 @@ static cs_de_dist_estimates_t get_distance(uint8_t ap)
 	return result;
 }
 
-#define DIST_MIN_M      (0.0f)
-#define DIST_MAX_M      (30.0f)
-
-#define PS_ANCHOR_M     (1.2f)
-#define RTT_AGREE_M     (1.0f)
-
-#define AP_SPREAD_BAD_M (1.0f)
-
-#define DT_SEC          (0.060f)
-
-#define AB_ALPHA_GOOD   (0.20f)
-#define AB_BETA_GOOD    (0.030f)
-
-#define AB_ALPHA_BAD    (0.06f)
-#define AB_BETA_BAD     (0.010f)
-
-#define EMA_ALPHA       (0.10f)
-
-#define MAD_WIN         (21)
-#define MAD_K           (3.0f)
-#define MAD_EPS         (0.06f)
-
 static bool fuse_one_ap(const cs_de_dist_estimates_t *de, float *out, float *spread_out)
 {
 	float ifft = de->ifft;
-	float ps   = de->phase_slope;
-	float rtt  = de->rtt;
+	float ps = de->phase_slope;
+	float rtt = de->rtt;
 
 	bool ifft_ok = isfinite(ifft) && (ifft >= DIST_MIN_M) && (ifft <= DIST_MAX_M);
-	bool ps_ok   = isfinite(ps)   && (ps   >= DIST_MIN_M) && (ps   <= DIST_MAX_M);
-	bool rtt_ok  = isfinite(rtt)  && (rtt  >= DIST_MIN_M) && (rtt  <= DIST_MAX_M);
+	bool ps_ok = isfinite(ps) && (ps >= DIST_MIN_M) && (ps <= DIST_MAX_M);
+	bool rtt_ok = isfinite(rtt) && (rtt >= DIST_MIN_M) && (rtt <= DIST_MAX_M);
 
 	if (ps_ok && ifft_ok && fabsf(ps - ifft) > PS_ANCHOR_M) {
 		ps_ok = false;
@@ -216,7 +255,7 @@ static bool fuse_one_ap(const cs_de_dist_estimates_t *de, float *out, float *spr
 	if (rtt_ok) {
 		bool agrees =
 			(ifft_ok && fabsf(rtt - ifft) <= RTT_AGREE_M) ||
-			(ps_ok   && fabsf(rtt - ps)   <= RTT_AGREE_M);
+			(ps_ok && fabsf(rtt - ps) <= RTT_AGREE_M);
 		if (!agrees) {
 			rtt_ok = false;
 		}
@@ -224,16 +263,28 @@ static bool fuse_one_ap(const cs_de_dist_estimates_t *de, float *out, float *spr
 
 	float v[3];
 	int n = 0;
-	if (ifft_ok) v[n++] = ifft;
-	if (ps_ok)   v[n++] = ps;
-	if (rtt_ok)  v[n++] = rtt;
+	if (ifft_ok) {
+		v[n++] = ifft;
+	}
+	if (ps_ok) {
+		v[n++] = ps;
+	}
+	if (rtt_ok) {
+		v[n++] = rtt;
+	}
 
-	if (n == 0) return false;
+	if (n == 0) {
+		return false;
+	}
 
 	float vmin = v[0], vmax = v[0];
 	for (int i = 1; i < n; i++) {
-		if (v[i] < vmin) vmin = v[i];
-		if (v[i] > vmax) vmax = v[i];
+		if (v[i] < vmin) {
+			vmin = v[i];
+		}
+		if (v[i] > vmax) {
+			vmax = v[i];
+		}
 	}
 	*spread_out = vmax - vmin;
 
@@ -245,6 +296,7 @@ static bool fuse_one_ap(const cs_de_dist_estimates_t *de, float *out, float *spr
 		*out = 0.5f * (v[0] + v[1]);
 		return true;
 	}
+
 	*out = median3(v[0], v[1], v[2]);
 	return true;
 }
@@ -285,7 +337,9 @@ static float mad_gate(float x, bool *accepted_out)
 
 	hist[idx] = x;
 	idx = (idx + 1) % MAD_WIN;
-	if (count < MAD_WIN) count++;
+	if (count < MAD_WIN) {
+		count++;
+	}
 
 	if (count < 7) {
 		*accepted_out = true;
@@ -346,6 +400,100 @@ static float ema_filter(float z, bool reset)
 
 	y = (1.0f - EMA_ALPHA) * y + EMA_ALPHA * z;
 	return y;
+}
+
+static uint8_t board_id_read_cb(struct bt_conn *conn, uint8_t err,
+				struct bt_gatt_read_params *params,
+				const void *data, uint16_t length)
+{
+	ARG_UNUSED(conn);
+
+	if (err) {
+		LOG_ERR("Board ID read failed (err 0x%02x)", err);
+	} else if (!data) {
+		LOG_WRN("Board ID read returned no data");
+	} else if (length != BOARD_ID_LEN) {
+		LOG_WRN("Unexpected board ID length: %u", length);
+	} else {
+		const uint8_t *id = data;
+
+		memcpy(cached_board_id, id, BOARD_ID_LEN);
+		board_id_valid = true;
+
+		LOG_INF("Reflector board ID: %02X%02X%02X%02X%02X%02X%02X%02X",
+			id[0], id[1], id[2], id[3],
+			id[4], id[5], id[6], id[7]);
+
+		printk("BOARD_ID:%02X%02X%02X%02X%02X%02X%02X%02X\n",
+		       id[0], id[1], id[2], id[3],
+		       id[4], id[5], id[6], id[7]);
+	}
+
+	memset(params, 0, sizeof(*params));
+	k_sem_give(&sem_board_id_read);
+	return BT_GATT_ITER_STOP;
+}
+
+static uint8_t board_id_discover_cb(struct bt_conn *conn,
+				    const struct bt_gatt_attr *attr,
+				    struct bt_gatt_discover_params *params)
+{
+	int err;
+
+	if (!attr) {
+		LOG_WRN("Board ID characteristic not found");
+		memset(params, 0, sizeof(*params));
+		k_sem_give(&sem_board_id_read);
+		return BT_GATT_ITER_STOP;
+	}
+
+	if (params->type == BT_GATT_DISCOVER_CHARACTERISTIC) {
+		const struct bt_gatt_chrc *chrc = attr->user_data;
+
+		board_id_value_handle = chrc->value_handle;
+
+		LOG_INF("Found board ID characteristic, value handle: 0x%04X",
+			board_id_value_handle);
+
+		memset(&board_id_read_params, 0, sizeof(board_id_read_params));
+		board_id_read_params.func = board_id_read_cb;
+		board_id_read_params.handle_count = 1;
+		board_id_read_params.single.handle = board_id_value_handle;
+		board_id_read_params.single.offset = 0;
+
+		err = bt_gatt_read(conn, &board_id_read_params);
+		if (err) {
+			LOG_ERR("Board ID read start failed (err %d)", err);
+			k_sem_give(&sem_board_id_read);
+		}
+
+		memset(params, 0, sizeof(*params));
+		return BT_GATT_ITER_STOP;
+	}
+
+	return BT_GATT_ITER_STOP;
+}
+
+static int board_id_read_start(struct bt_conn *conn)
+{
+	int err;
+
+	board_id_value_handle = 0;
+
+	memset(&board_id_discover_params, 0, sizeof(board_id_discover_params));
+	board_id_discover_params.uuid = &board_id_char_uuid.uuid;
+	board_id_discover_params.start_handle = 0x0001;
+	board_id_discover_params.end_handle = 0xffff;
+	board_id_discover_params.type = BT_GATT_DISCOVER_CHARACTERISTIC;
+	board_id_discover_params.func = board_id_discover_cb;
+
+	err = bt_gatt_discover(conn, &board_id_discover_params);
+	if (err) {
+		LOG_ERR("Board ID characteristic discovery failed (err %d)", err);
+		return err;
+	}
+
+	return 0;
 }
 
 static void ranging_data_cb(struct bt_conn *conn, uint16_t ranging_counter, int err)
@@ -411,8 +559,8 @@ static void subevent_result_cb(struct bt_conn *conn, struct bt_conn_le_cs_subeve
 		return;
 	}
 
-	if (most_recent_local_ranging_counter
-		!= bt_ras_rreq_get_ranging_counter(result->header.procedure_counter)) {
+	if (most_recent_local_ranging_counter !=
+	    bt_ras_rreq_get_ranging_counter(result->header.procedure_counter)) {
 		int sem_state = k_sem_take(&sem_local_steps, K_NO_WAIT);
 
 		if (sem_state < 0) {
@@ -579,8 +727,15 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 {
 	LOG_INF("Disconnected (reason 0x%02X)", reason);
 
-	bt_conn_unref(conn);
-	connection = NULL;
+	if (connection) {
+		bt_conn_unref(conn);
+		connection = NULL;
+	}
+
+	board_id_value_handle = 0;
+	memset(&board_id_discover_params, 0, sizeof(board_id_discover_params));
+	memset(&board_id_read_params, 0, sizeof(board_id_read_params));
+
 	dk_set_led_off(CON_STATUS_LED);
 
 	sys_reboot(SYS_REBOOT_COLD);
@@ -655,52 +810,14 @@ void ras_features_read_cb(struct bt_conn *conn, uint32_t feature_bits, int err)
 	k_sem_give(&sem_ras_features);
 }
 
-/* Parse advertised device name from reflector */
-static bool adv_data_name_cb(struct bt_data *data, void *user_data)
-{
-	char *name = user_data;
-
-	if (data->type == BT_DATA_NAME_COMPLETE ||
-	    data->type == BT_DATA_NAME_SHORTENED) {
-		size_t len = MIN(data->data_len, DEVICE_NAME_LEN - 1);
-
-		memcpy(name, data->data, len);
-		name[len] = '\0';
-
-		return false;
-	}
-
-	return true;
-}
-
 static void scan_filter_match(struct bt_scan_device_info *device_info,
 			      struct bt_scan_filter_match *filter_match, bool connectable)
 {
 	ARG_UNUSED(filter_match);
 
 	char addr[BT_ADDR_LE_STR_LEN];
-	char name[DEVICE_NAME_LEN] = {0};
-
 	bt_addr_le_to_str(device_info->recv_info->addr, addr, sizeof(addr));
-
-	if (device_info->adv_data) {
-		bt_data_parse(device_info->adv_data, adv_data_name_cb, name);
-	}
-
-	if (name[0] != '\0') {
-		strncpy(matched_reflector_name, name, sizeof(matched_reflector_name) - 1);
-		matched_reflector_name[sizeof(matched_reflector_name) - 1] = '\0';
-		matched_reflector_name_valid = true;
-
-		LOG_INF("Filters matched. Address: %s connectable: %d name: %s",
-			addr, connectable, matched_reflector_name);
-	} else {
-		matched_reflector_name[0] = '\0';
-		matched_reflector_name_valid = false;
-
-		LOG_INF("Filters matched. Address: %s connectable: %d name: <not present>",
-			addr, connectable);
-	}
+	LOG_INF("Filters matched. Address: %s connectable: %d", addr, connectable);
 }
 
 static void scan_connecting_error(struct bt_scan_device_info *device_info)
@@ -709,7 +826,7 @@ static void scan_connecting_error(struct bt_scan_device_info *device_info)
 
 	LOG_INF("Connecting failed, restarting scanning");
 
-	int err = bt_scan_start(BT_SCAN_TYPE_SCAN_ACTIVE);
+	int err = bt_scan_start(BT_SCAN_TYPE_SCAN_PASSIVE);
 	if (err) {
 		LOG_ERR("Failed to restart scanning (err %i)", err);
 	}
@@ -719,12 +836,7 @@ static void scan_connecting(struct bt_scan_device_info *device_info, struct bt_c
 {
 	ARG_UNUSED(device_info);
 	ARG_UNUSED(conn);
-
-	if (matched_reflector_name_valid) {
-		LOG_INF("Connecting to reflector tag: %s", matched_reflector_name);
-	} else {
-		LOG_INF("Connecting to reflector tag: <unknown>");
-	}
+	LOG_INF("Connecting");
 }
 
 BT_SCAN_CB_INIT(scan_cb, scan_filter_match, NULL, scan_connecting_error, scan_connecting);
@@ -734,10 +846,7 @@ static int scan_init(void)
 	int err;
 
 	struct bt_scan_init_param param = {
-		.scan_param = BT_LE_SCAN_PARAM(BT_LE_SCAN_TYPE_ACTIVE,
-					       BT_LE_SCAN_OPT_NONE,
-					       BT_GAP_SCAN_FAST_INTERVAL,
-					       BT_GAP_SCAN_FAST_WINDOW),
+		.scan_param = NULL,
 		.conn_param = BT_LE_CONN_PARAM(0x10, 0x10, 0, BT_GAP_MS_TO_CONN_TIMEOUT(4000)),
 		.connect_if_match = 1
 	};
@@ -792,7 +901,7 @@ int main(void)
 		return 0;
 	}
 
-	err = bt_scan_start(BT_SCAN_TYPE_SCAN_ACTIVE);
+	err = bt_scan_start(BT_SCAN_TYPE_SCAN_PASSIVE);
 	if (err) {
 		LOG_ERR("Scanning failed to start (err %i)", err);
 		return 0;
@@ -819,6 +928,15 @@ int main(void)
 	}
 
 	k_sem_take(&sem_discovery_done, K_FOREVER);
+
+	err = board_id_read_start(connection);
+	if (err) {
+		LOG_ERR("Board ID read setup failed (err %d)", err);
+	} else {
+		if (k_sem_take(&sem_board_id_read, K_SECONDS(2)) != 0) {
+			LOG_WRN("Board ID read timed out, continuing without it");
+		}
+	}
 
 	const struct bt_le_cs_set_default_settings_param default_settings = {
 		.enable_initiator_role = true,
@@ -968,14 +1086,25 @@ int main(void)
 		bool bad_frame = (!accepted) || (spread > AP_SPREAD_BAD_M);
 
 		float alpha = bad_frame ? AB_ALPHA_BAD : AB_ALPHA_GOOD;
-		float beta  = bad_frame ? AB_BETA_BAD  : AB_BETA_GOOD;
+		float beta = bad_frame ? AB_BETA_BAD : AB_BETA_GOOD;
 
 		float ab = alpha_beta_filter(gated, alpha, beta, reset_filters);
 		float out = ema_filter(ab, reset_filters);
 
 		reset_filters = false;
 
+		distance_print_count++;
+
 		printk("%.2f\n", (double)out);
+
+		if (board_id_valid && (distance_print_count % BOARD_ID_PRINT_EVERY == 0)) {
+			printk("%02X%02X%02X%02X%02X%02X%02X%02X\n",
+			       cached_board_id[0], cached_board_id[1],
+			       cached_board_id[2], cached_board_id[3],
+			       cached_board_id[4], cached_board_id[5],
+			       cached_board_id[6], cached_board_id[7]);
+		}
+
 	}
 
 	return 0;

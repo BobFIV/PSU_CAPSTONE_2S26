@@ -17,6 +17,8 @@
 #include <zephyr/bluetooth/conn.h>
 #include <zephyr/bluetooth/uuid.h>
 #include <zephyr/bluetooth/cs.h>
+#include <zephyr/bluetooth/gatt.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <bluetooth/services/ras.h>
 #include <zephyr/settings/settings.h>
 #include <dk_buttons_and_leds.h>
@@ -25,20 +27,80 @@
 LOG_MODULE_REGISTER(app_main, LOG_LEVEL_INF);
 
 #define CON_STATUS_LED DK_LED1
-
-//Custom Reflector Flag per user
-static const char reflector_name[] = "Ryan Litzinger";
+#define BOARD_ID_LEN 8
 
 static K_SEM_DEFINE(sem_connected, 0, 1);
 static K_SEM_DEFINE(sem_config, 0, 1);
 
 static struct bt_conn *connection;
 
+/* Keep advertising simple */
 static const struct bt_data ad[] = {
 	BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
 	BT_DATA_BYTES(BT_DATA_UUID16_ALL, BT_UUID_16_ENCODE(BT_UUID_RANGING_SERVICE_VAL)),
-	BT_DATA(BT_DATA_NAME_COMPLETE, reflector_name, sizeof(reflector_name) - 1),
 };
+
+/* 8-byte board ID */
+static uint8_t board_id[BOARD_ID_LEN];
+
+/* Must match initiator UUID exactly */
+static struct bt_uuid_128 board_id_char_uuid =
+	BT_UUID_INIT_128(0x11, 0x32, 0x54, 0x76,
+			 0x98, 0xba,
+			 0xdc, 0xfe,
+			 0x10, 0x32,
+			 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe);
+
+static ssize_t read_board_id(struct bt_conn *conn,
+			     const struct bt_gatt_attr *attr,
+			     void *buf,
+			     uint16_t len,
+			     uint16_t offset)
+{
+	const uint8_t *value = attr->user_data;
+
+	return bt_gatt_attr_read(conn, attr, buf, len, offset, value, BOARD_ID_LEN);
+}
+
+BT_GATT_SERVICE_DEFINE(board_id_svc,
+	BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_128(
+		0x10, 0x32, 0x54, 0x76,
+		0x98, 0xba,
+		0xdc, 0xfe,
+		0x10, 0x32,
+		0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe)),
+	BT_GATT_CHARACTERISTIC(&board_id_char_uuid.uuid,
+			       BT_GATT_CHRC_READ,
+			       BT_GATT_PERM_READ,
+			       read_board_id, NULL, board_id),
+);
+
+static void init_board_id(void)
+{
+	int err;
+
+	err = hwinfo_get_device_eui64(board_id);
+	if (err == 0) {
+		LOG_INF("Board ID (EUI64): %02X%02X%02X%02X%02X%02X%02X%02X",
+			board_id[0], board_id[1], board_id[2], board_id[3],
+			board_id[4], board_id[5], board_id[6], board_id[7]);
+		return;
+	}
+
+	LOG_WRN("hwinfo_get_device_eui64 unavailable (err %d), trying device_id", err);
+
+	memset(board_id, 0, sizeof(board_id));
+	ssize_t len = hwinfo_get_device_id(board_id, sizeof(board_id));
+	if (len > 0) {
+		LOG_INF("Board ID (device_id): %02X%02X%02X%02X%02X%02X%02X%02X",
+			board_id[0], board_id[1], board_id[2], board_id[3],
+			board_id[4], board_id[5], board_id[6], board_id[7]);
+		return;
+	}
+
+	LOG_ERR("No hardware ID available, using all zeros");
+	memset(board_id, 0, sizeof(board_id));
+}
 
 static void connected_cb(struct bt_conn *conn, uint8_t err)
 {
@@ -52,9 +114,7 @@ static void connected_cb(struct bt_conn *conn, uint8_t err)
 		connection = NULL;
 	} else {
 		connection = bt_conn_ref(conn);
-
 		k_sem_give(&sem_connected);
-
 		dk_set_led_on(CON_STATUS_LED);
 	}
 }
@@ -63,8 +123,10 @@ static void disconnected_cb(struct bt_conn *conn, uint8_t reason)
 {
 	LOG_INF("Disconnected (reason 0x%02X)", reason);
 
-	bt_conn_unref(conn);
-	connection = NULL;
+	if (connection) {
+		bt_conn_unref(conn);
+		connection = NULL;
+	}
 
 	dk_set_led_off(CON_STATUS_LED);
 
@@ -95,8 +157,8 @@ static void config_create_cb(struct bt_conn *conn, uint8_t status,
 					   "Invalid"};
 		const char *role_str[3] = {"Initiator", "Reflector", "Invalid"};
 		const char *rtt_type_str[8] = {
-			"AA only",	 "32-bit sounding", "96-bit sounding", "32-bit random",
-			"64-bit random", "96-bit random",   "128-bit random",  "Invalid"};
+			"AA only", "32-bit sounding", "96-bit sounding", "32-bit random",
+			"64-bit random", "96-bit random", "128-bit random", "Invalid"};
 		const char *phy_str[4] = {"Invalid", "LE 1M PHY", "LE 2M PHY", "LE 2M 2BT PHY"};
 		const char *chsel_type_str[3] = {"Algorithm #3b", "Algorithm #3c", "Invalid"};
 		const char *ch3c_shape_str[3] = {"Hat shape", "X shape", "Invalid"};
@@ -203,9 +265,9 @@ int main(void)
 	int err;
 
 	LOG_INF("Starting Channel Sounding Reflector Sample");
-	LOG_INF("Advertising reflector tag: %s", reflector_name);
 
 	dk_leds_init();
+	init_board_id();
 
 	err = bt_enable(NULL);
 	if (err) {
