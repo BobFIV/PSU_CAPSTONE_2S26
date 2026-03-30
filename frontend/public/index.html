@@ -1,8 +1,7 @@
-!DOCTYPE html>
+<!DOCTYPE html>
 <html>
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-
 <title>Luggage Monitor</title>
 
 <style>
@@ -13,12 +12,21 @@ body {
   text-align: center;
 }
 
-.screen { display:none; padding:15px; padding-bottom:90px; }
-.active { display:block; }
+.screen {
+  display:none;
+  padding:15px;
+  padding-bottom:90px;
+}
+
+.active {
+  display:block;
+}
 
 .statusBox {
-  width:70vw; max-width:260px;
-  height:70vw; max-height:260px;
+  width:70vw;
+  max-width:260px;
+  height:70vw;
+  max-height:260px;
   margin:20px auto;
   border-radius:25px;
   display:flex;
@@ -75,10 +83,18 @@ button {
 
 <body>
 
-<!-- STATUS -->
+<!-- USER VIEW -->
+<!-- CHANGE HERE FOR USER NAME TAG*************-->
+<div id="user" class="screen active">
+<h1 id="userTitle">User's Luggage</h1>
+<div id="userStatusBox" class="statusBox">--</div>
+<p id="userAlertText" style="color:red;font-weight:bold;"></p>
+</div>
 
-<div id="status" class="screen active">
-<h1>Status</h1>
+<!-- DEVELOPER STATUS -->
+
+<div id="status" class="screen">
+<h1>Developer Status</h1>
 
 <div id="statusBox" class="statusBox">--</div>
 
@@ -86,6 +102,16 @@ button {
 <h2 id="distance">Distance: --</h2>
 <h2 id="state">State: --</h2>
 <p id="alertText" style="color:red;font-weight:bold;"></p>
+</div>
+
+<div class="card">
+<h3>Recent Alerts</h3>
+<div id="log" style="
+  text-align:left;
+  max-height:150px;
+  overflow-y:auto;
+  font-size:14px;
+"></div>
 </div>
 </div>
 
@@ -107,21 +133,25 @@ button {
 <h1>Settings</h1>
 
 <div class="card">
+
+<h3>User Name</h3>
+<input id="userNameInput" type="text">
+<button onclick="saveUserName()">Save</button>
+
+<br><br>
+
 <h3>Alert Thresholds (cm)</h3>
 
 <p>Normal max:</p>
+<input id="normalInput" type="number">
+
+<p>Caution max:</p>
 <input id="cautionInput" type="number">
 
 <br><br>
-<button onclick="saveThresholds()">Save</button>
+<button onclick="saveThresholds()">Save Thresholds</button>
 
 <p id="saveMsg"></p>
-
-<br>
-<button onclick="enableNotifications()">
-Enable Alerts
-</button>
-<p id="notifMsg"></p>
 
 </div>
 </div>
@@ -129,7 +159,8 @@ Enable Alerts
 <!-- NAV -->
 
 <div class="nav">
-<button onclick="show('status')">Status</button>
+<button onclick="show('user')">User</button>
+<button onclick="show('status')">Developer</button>
 <button onclick="show('wheelchair')">Chair</button>
 <button onclick="show('settings')">Settings</button>
 </div>
@@ -140,7 +171,7 @@ Enable Alerts
 
 function show(id){
   document.querySelectorAll('.screen')
-    .forEach(s=>s.classList.remove('active'));
+    .forEach(s => s.classList.remove('active'));
   document.getElementById(id).classList.add('active');
 }
 
@@ -158,21 +189,45 @@ function saveThresholds(){
   thresholds.normalMax = Number(normalInput.value);
   thresholds.cautionMax = Number(cautionInput.value);
 
-  localStorage.setItem("thresholds",
-    JSON.stringify(thresholds));
-
+  localStorage.setItem("thresholds", JSON.stringify(thresholds));
   saveMsg.innerText = "Saved!";
 }
-/* ---------- Notifications Permission ---------- */
 
-if ("Notification" in window) {
-  Notification.requestPermission();
+/* ---------- User Name ---------- */
+
+let userName = localStorage.getItem("userName") || "User";
+
+userNameInput.value = userName;
+updateUserTitle();
+
+function saveUserName(){
+  userName = userNameInput.value || "User";
+  localStorage.setItem("userName", userName);
+  updateUserTitle();
 }
 
-/* ---------- Alert State Tracking ---------- */
+function updateUserTitle(){
+  userTitle.innerText = `${userName}'s Luggage`;
+}
 
-let lastState="";
-let lastVibeTime=0;
+/* ---------- Alert Log ---------- */
+
+let lastState = "";
+
+function addLog(msg){
+  const time = new Date().toLocaleTimeString();
+
+  log.innerHTML = `${time} - ${msg}<br>` + log.innerHTML;
+
+  let entries = log.innerHTML.split("<br>");
+  entries = entries.filter(e => e.trim() !== "");
+
+  if(entries.length > 10){
+    entries = entries.slice(0,10);
+  }
+
+  log.innerHTML = entries.join("<br>") + "<br>";
+}
 
 /* ---------- Fetch Data ---------- */
 
@@ -183,83 +238,72 @@ async function fetchData(){
 
   let distance = prox.distance_cm;
 
-/* ----- Determine State ----- */
-
-  let state="normal";
+  let state = "normal";
 
   if(distance > thresholds.cautionMax)
-    state="separation";
+    state = "separation";
   else if(distance > thresholds.normalMax)
-    state="caution";
+    state = "caution";
 
-/* ----- UI Updates ----- */
+  /* ----- Developer View ----- */
 
-  distanceEl.innerText = "Distance: "+distance+" cm";
-  stateEl.innerText = "State: "+state;
+  distanceEl.innerText = "Distance: " + distance + " cm";
+  stateEl.innerText = "State: " + state;
 
-  const box=statusBox;
-  box.innerText=state.toUpperCase();
+  statusBox.innerText = state.toUpperCase();
 
-  if(state==="normal") box.style.background="green";
-  else if(state==="caution") box.style.background="orange";
-  else box.style.background="red";
+  if(state==="normal") statusBox.style.background="green";
+  else if(state==="caution") statusBox.style.background="orange";
+  else statusBox.style.background="red";
 
   alertText.innerText =
     (state==="separation") ? "LUGGAGE TOO FAR" : "";
 
-/* ----- Vibration + Notification ----- */
+  /* ----- User View ----- */
 
-  let now=Date.now();
+  userStatusBox.innerText = state.toUpperCase();
 
-  if(state==="separation" &&
-     lastState!=="separation"){
+  if(state==="normal") userStatusBox.style.background="green";
+  else if(state==="caution") userStatusBox.style.background="orange";
+  else userStatusBox.style.background="red";
 
-    // Vibration
-    if("vibrate" in navigator &&
-       now-lastVibeTime>5000){
-       navigator.vibrate([300,150,300,150,500]);
-       lastVibeTime=now;
-    }
+  userAlertText.innerText =
+    (state==="separation") ? "LUGGAGE TOO FAR" : "";
 
-    // Notification
-    if(Notification.permission==="granted"){
-      new Notification("Luggage Separation Alert",{
-        body:"Your luggage is too far away.",
-        icon:"https://cdn-icons-png.flaticon.com/512/854/854878.png"
-      });
-    }
+  /* ----- Logs ----- */
+
+  if(state !== lastState){
+    if(state==="caution") addLog("Caution zone entered");
+    if(state==="separation") addLog("Separation detected");
+    if(state==="normal" && lastState!=="") addLog("Returned to normal");
   }
 
-  lastState=state;
+  lastState = state;
 
-/* ----- Wheelchair Status ----- */
+  /* ----- Wheelchair ----- */
 
-  battery.innerText =
-    "Battery: "+status.battery_level+"%";
-
-  link.innerText =
-    "Link: "+status.link_state;
-
-  server.innerText =
-    "Server: "+status.server_state;
-
+  battery.innerText = "Battery: " + status.battery_level + "%";
+  link.innerText = "Link: " + status.link_state;
+  server.innerText = "Server: " + status.server_state;
   lastUpdate.innerText =
-    "Updated: "+new Date(
-      status.last_update_time).toLocaleTimeString();
+    "Updated: " + new Date(status.last_update_time).toLocaleTimeString();
 }
 
-/* ----- Element Shortcuts ----- */
+/* ---------- Shortcuts ---------- */
 
 const distanceEl = document.getElementById("distance");
 const stateEl = document.getElementById("state");
 const statusBox = document.getElementById("statusBox");
+const userStatusBox = document.getElementById("userStatusBox");
 const alertText = document.getElementById("alertText");
+const userAlertText = document.getElementById("userAlertText");
 const battery = document.getElementById("battery");
 const link = document.getElementById("link");
 const server = document.getElementById("server");
 const lastUpdate = document.getElementById("lastUpdate");
+const log = document.getElementById("log");
 
-/* ----- Start Polling ----- */
+/* ---------- Start ---------- */
 
 setInterval(fetchData,1000);
 fetchData();
@@ -268,4 +312,3 @@ fetchData();
 
 </body>
 </html>
-
