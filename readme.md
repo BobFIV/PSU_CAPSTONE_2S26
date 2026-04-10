@@ -16,7 +16,7 @@ Each heading below will provide the necessary information about each section.
 
 ## Channel Sounding
 
-### Channel sounding Initiator and Reflector code started from the samples Bluetooth LE Channel Sounding Initiator with RREQ and Bluetooth LE Channel Sounding Reflector with RRSP Below are the changes made from those samples specifically for this project
+Channel sounding Initiator and Reflector code started from the samples Bluetooth LE Channel Sounding Initiator with RREQ and Bluetooth LE Channel Sounding Reflector with RRSP Below are the changes made from those samples specifically for this project
 
 - **Added a sliding window over distance estimates**
   - Stores the last `DE_SLIDING_WINDOW_SIZE` results per antenna path (AP).
@@ -42,9 +42,9 @@ Each heading below will provide the necessary information about each section.
  - Prints distance value per output in meters
  - Prints unique tag ID once every twenty distance messages
 
- - **Build**
-  - To build the code, first you must have a Nordic Semiconductor nrf54l15 device
-  - You must also install the nRF connect vs-code extension. 
-  - You must build code for both the Initiator and Reflector, then flash that build to each device respectively. 
+- **Build**
+ - To build the code, first you must have a Nordic Semiconductor nrf54l15 device
+ - You must also install the nRF connect vs-code extension. 
+ - You must build code for both the Initiator and Reflector, then flash that build to each device respectively. 
     - A common issue with building is the filepath becomes too long. Make sure to build the code in the root director of your computer (directly on the C drive if in windows).
     - If you need more help with building, view nordic semiconductor's trainings for more information. 
