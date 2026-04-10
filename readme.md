@@ -21,7 +21,5 @@
   - Uses **adaptive gains**: when a frame looks unreliable (outlier gate triggers or AP spread is large), the filter updates more conservatively.
 
 - **Output behavior**
- - Prints one value per output in meters
-
- - **Reflector Tag**
-  - Added User name as Reflector Device name. Name is outputted to initiator serial output when connecting to reflector device.
+ - Prints distance value per output in meters
+ - Prints unique tag ID once every twenty distance messages
