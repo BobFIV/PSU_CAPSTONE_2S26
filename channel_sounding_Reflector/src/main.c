@@ -2,11 +2,29 @@
  * Copyright (c) 2024 Nordic Semiconductor ASA
  *
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+ * 
+ * This program acts as a Bluetooth Channel Sounding (CS) reflector using the Zephyr RTOS.
+ * Its main job is to advertise itself, accept a connection from a CS initiator device,
+ * and participate in ranging procedures so the initiator can measure distance.
+ *
+ * The code first initializes Bluetooth, LEDs, and a unique board ID taken from the
+ * device’s hardware information. That board ID is exposed through a custom GATT service
+ * so the connected initiator can read and identify this reflector board.
+ *
+ * Once connected, the reflector configures its default Channel Sounding settings,
+ * waits for a valid CS configuration from the initiator, and then sets the procedure
+ * parameters needed for ranging. After that, it enables CS procedures so the device
+ * can continuously respond during distance measurement exchanges.
+ *
+ * In short, this file handles the reflector side of the system:
+ * 1. Initialize hardware, Bluetooth, and board ID
+ * 2. Start advertising the ranging service
+ * 3. Accept a connection from an initiator
+ * 4. Share the board ID through a GATT characteristic
+ * 5. Configure reflector Channel Sounding settings
+ * 6. Enable and participate in ranging procedures
  */
 
-/** @file
- *  @brief Channel Sounding Reflector with Ranging Responder sample
- */
 
 #include <zephyr/types.h>
 #include <zephyr/kernel.h>

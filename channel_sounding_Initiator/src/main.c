@@ -2,6 +2,29 @@
  * Copyright (c) 2024 Nordic Semiconductor ASA
  *
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+ * 
+ * This program implements a Bluetooth Channel Sounding (CS) initiator using the Zephyr RTOS.
+ * It scans for and connects to a compatible reflector device, establishes a secure Bluetooth
+ * connection, and performs continuous ranging procedures to estimate distance.
+ *
+ * The code collects raw ranging data (IFFT, phase slope, RTT) from multiple antenna paths,
+ * stores recent measurements in a sliding window, and applies statistical processing to
+ * improve accuracy. This includes trimmed means, median filtering, and outlier rejection
+ * using a Median Absolute Deviation (MAD) gate.
+ *
+ * After filtering, the measurements are fused and passed through smoothing filters
+ * (alpha-beta filter and exponential moving average) to produce a stable distance estimate.
+ *
+ * The program continuously outputs the estimated distance over time and periodically prints
+ * the connected device's board ID if available.
+ *
+ * Overall flow:
+ * 1. Initialize Bluetooth and start scanning
+ * 2. Connect to a reflector device and establish security
+ * 3. Discover services and read board ID
+ * 4. Configure and enable channel sounding procedures
+ * 5. Collect and process ranging data in real time
+ * 6. Filter and output a smooth distance estimate
  */
 
 #include <math.h>
