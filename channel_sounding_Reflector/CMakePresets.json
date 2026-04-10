@@ -1,0 +1,21 @@
+{
+    "version": 2,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 20
+    },
+    "configurePresets": [
+        {
+            "name": "..Reflector",
+            "displayName": "Build for BL54L15 DVK nRF54l15 Application Non Secure",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/..Reflector",
+            "cacheVariables": {
+                "BOARD": "bl54l15_dvk/nrf54l15/cpuapp/ns",
+                "DEBUG_THREAD_INFO": true,
+                "CONFIG_DEBUG_THREAD_INFO": true,
+                "channel_sounding_Reflector_DEBUG_THREAD_INFO": true
+            }
+        }
+    ]
+}
