@@ -1,4 +1,4 @@
-### Official Github Repository for the Smart Luggage Logistics and Connectivity for Wheelchair Travelers Project
+# Official Github Repository for the Smart Luggage Logistics and Connectivity for Wheelchair Travelers Project
 
 This GitHub Repository contains all of the code used for the Smart Luggage Logistics and Connectivity for Wheelchair Travelers Project. 
 
@@ -16,7 +16,7 @@ Each heading below will provide the necessary information about each section.
 
 ## Channel Sounding
 
-# Channel sounding Initiator and Reflector code started from the samples Bluetooth LE Channel Sounding Initiator with RREQ and Bluetooth LE Channel Sounding Reflector with RRSP Below are the changes made from those samples specifically for this project
+### Channel sounding Initiator and Reflector code started from the samples Bluetooth LE Channel Sounding Initiator with RREQ and Bluetooth LE Channel Sounding Reflector with RRSP Below are the changes made from those samples specifically for this project
 
 - **Added a sliding window over distance estimates**
   - Stores the last `DE_SLIDING_WINDOW_SIZE` results per antenna path (AP).
