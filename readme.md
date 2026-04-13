@@ -107,12 +107,7 @@ This repository includes two deployment related folders:
 
 **Typical usage**
 
-After copying the .service files into /etc/systemd/system/, reload systemd and enable the services:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable <service-name>
-sudo systemctl start <service-name>
+After copying the .service files into /etc/systemd/system/, reload systemd and enable the services
 
 ## Channel Sounding
 
