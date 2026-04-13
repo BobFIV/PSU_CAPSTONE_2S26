@@ -14,6 +14,8 @@ Each heading below will provide the necessary information about each section.
 
 The front end website provides a real time interface to monitor the status of one's luggage in relation to the wheelchair. There are two distinct views, the user view and the developer view (the developer view has more detailed information than simply if the luggage is detached or not).
 
+**Features**
+
 - **Real time updates**
 - **Color coded status indicator**
       - Green for normal
@@ -23,6 +25,7 @@ The front end website provides a real time interface to monitor the status of on
       - The user can input at what distance away the luggage should be in order to receive an alert.
 
 **Running the front end**
+
 index.html contains the full front-end implementation, including the UI layout, styling, and JavaScript logic.
 
 - Start the backend server by running node server.js
