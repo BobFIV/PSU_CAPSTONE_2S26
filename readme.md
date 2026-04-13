@@ -18,11 +18,15 @@ The front end website provides a real time interface to monitor the status of on
 
 - **Real time updates**
 - **Color coded status indicator**
-      - Green for normal
-      - Yellow for caution
-      - Red for separation
+
+        - Green for normal
+
+        - Yellow for caution
+
+        - Red for separation
 - **Adjustable thresholds for each status level**
-      - The user can input at what distance away the luggage should be in order to receive an alert.
+
+        - The user can input at what distance away the luggage should be in order to receive an alert.
 
 **Running the front end**
 
