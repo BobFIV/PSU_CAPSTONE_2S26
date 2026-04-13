@@ -6,8 +6,11 @@ import os
 import re
 import sys
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import Optional, Tuple
 
+import requests
 import serial
 
 BAUD = 115200
@@ -16,6 +19,18 @@ PROBE_SECONDS_PER_PORT = 1.5
 
 MIN_M = 0.0
 MAX_M = 20.0
+UPLOAD_DELTA_M = 0.3
+
+CSE_BASE = "http://localhost:8081"
+CSE_ID = "id-mn"
+CSE_NAME = "cse-mn"
+ORIGIN = "CAdmin"
+AE_NAME = "CAdmin"
+CNT_NAME = "proximity"
+
+
+DEFAULT_TAG_ID = "UNKNOWN"
+DEFAULT_TAG_NAME = "UnknownTag"
 
 DIST_PATTERNS = [
     re.compile(r"^\s*DIST\s*:\s*([+-]?\d+(?:\.\d+)?)\s*$", re.IGNORECASE),
@@ -25,9 +40,18 @@ DIST_PATTERNS = [
 
 ID_PATTERN = re.compile(r"^\s*([0-9A-Fa-f]{16})\s*$")
 
+TAG_NAME_MAP = {
+     "6E4ABBD598C5AB18": "Luggage_A",
+     "FADB056E3FE90D5D": "Luggage_B"
+}
+
 
 def log(msg: str) -> None:
     print(msg, file=sys.stderr, flush=True)
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def parse_distance_m(line: str) -> Optional[float]:
@@ -54,12 +78,11 @@ def parse_id(line: str) -> Optional[str]:
     s = line.strip()
     if not s:
         return None
-
     m = ID_PATTERN.match(s)
     if not m:
         return None
-
     return m.group(1).upper()
+
 
 def open_serial(port: str) -> serial.Serial:
     return serial.Serial(
@@ -71,12 +94,11 @@ def open_serial(port: str) -> serial.Serial:
 
 
 def candidate_ports():
-    ports = sorted(set(
+    return sorted(set(
         glob.glob("/dev/ttyACM*") +
         glob.glob("/dev/ttyUSB*") +
         glob.glob("/dev/serial/by-id/*")
     ))
-    return ports
 
 
 def score_line(line: str) -> int:
@@ -161,27 +183,74 @@ def auto_select_port() -> Optional[str]:
     return best_port
 
 
-def main() -> int:
+def cin_url() -> str:
+    return f"{CSE_BASE}/~/{CSE_ID}/{CSE_NAME}/{AE_NAME}/{CNT_NAME}"
+
+
+def headers():
+    return {
+        "X-M2M-Origin": ORIGIN,
+        "X-M2M-RI": str(uuid.uuid4()),
+        "X-M2M-RVI": "5",
+        "Content-Type": "application/json;ty=4",
+        "Accept": "application/json",
+    }
+
+
+def safe_tag_id(tag_id: Optional[str]) -> str:
+    return tag_id if tag_id else DEFAULT_TAG_ID
+
+
+def tag_name_from_id(tag_id: Optional[str]) -> str:
+    if not tag_id:
+        return DEFAULT_TAG_NAME
+    return TAG_NAME_MAP.get(tag_id, DEFAULT_TAG_NAME)
+
+
+def post_distance(distance_m: float, tag_id: Optional[str]) -> bool:
+    payload = {
+        "m2m:cin": {
+            "con": {
+                "distance_m": distance_m,
+                "tag_id": safe_tag_id(tag_id),
+                "tag_name": tag_name_from_id(tag_id),
+                "ts": now_iso(),
+            }
+        }
+    }
+
     try:
-        sys.stdout.reconfigure(line_buffering=True)
-    except Exception:
-        pass
+        r = requests.post(cin_url(), headers=headers(), json=payload, timeout=5)
+    except Exception as e:
+        log(f"[post error] {e}")
+        return False
 
-    port = auto_select_port()
-    if not port:
-        return 2
+    if r.status_code not in (200, 201):
+        log(f"[post failed] status={r.status_code} body={r.text}")
+        return False
 
-    while True:
-        try:
-            ser = open_serial(port)
-            log(f"Connected to {port} at {BAUD} baud")
-            break
-        except Exception as e:
-            log(f"Failed to open {port}: {e}. Retrying in 1 second.")
-            time.sleep(1)
+    log(
+        f"[post ok] distance={distance_m:.2f} "
+        f"tag_id={safe_tag_id(tag_id)} "
+        f"tag_name={tag_name_from_id(tag_id)}"
+    )
+    return True
+
+
+def should_upload(distance_m: float, last_uploaded_distance: Optional[float]) -> bool:
+    if last_uploaded_distance is None:
+        return True
+    return abs(distance_m - last_uploaded_distance) > UPLOAD_DELTA_M
+
+
+def run_once(port: str) -> None:
+    last_id = None
+    last_uploaded_distance = None
+
+    ser = open_serial(port)
+    log(f"Connected to {port} at {BAUD} baud")
 
     buf = b""
-
     try:
         while True:
             chunk = ser.read(256)
@@ -196,31 +265,49 @@ def main() -> int:
                 if not line:
                     continue
 
-                d = parse_distance_m(line)
-                if d is not None:
-                    print(f"{d:.2f}", flush=True)
-                    continue
-
                 sid = parse_id(line)
                 if sid is not None:
-                    print(sid, flush=True)
+                    last_id = sid
+                    log(f"[id] {last_id}")
                     continue
 
-                continue
+                d = parse_distance_m(line)
+                if d is None:
+                    continue
 
-    except KeyboardInterrupt:
-        log("Interrupted by user.")
-        return 0
+                if not should_upload(d, last_uploaded_distance):
+                    log(
+                        f"[skip] distance={d:.2f} "
+                        f"last_uploaded={last_uploaded_distance:.2f} "
+                        f"delta={abs(d - last_uploaded_distance):.2f}"
+                    )
+                    continue
 
-    except Exception as e:
-        log(f"Read loop error: {e}")
-        return 1
+                if post_distance(d, last_id):
+                    last_uploaded_distance = d
 
     finally:
         try:
             ser.close()
         except Exception:
             pass
+
+
+def main() -> int:
+    while True:
+        port = auto_select_port()
+        if not port:
+            time.sleep(1)
+            continue
+
+        try:
+            run_once(port)
+        except KeyboardInterrupt:
+            log("Interrupted by user.")
+            return 0
+        except Exception as e:
+            log(f"[serial error] {e}")
+            time.sleep(1)
 
 
 if __name__ == "__main__":

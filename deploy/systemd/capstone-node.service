@@ -1,0 +1,16 @@
+[Unit]
+Description=Capstone Node Server
+After=capstone-serial.service
+Requires=capstone-serial.service
+
+[Service]
+Type=simple
+User=raaid
+WorkingDirectory=/home/raaid/Desktop/capstone2
+ExecStart=/home/raaid/Desktop/capstone2/systemd/run_node.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+
